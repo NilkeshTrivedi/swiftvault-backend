@@ -1,0 +1,41 @@
+package com.swiftvault.backend.exception;
+
+import org.springframework.http.HttpStatus;
+import lombok.Getter;
+
+/**
+ * Base exception for all business logic errors in SwiftVault.
+ * Carries an HTTP status so the global handler knows what code to return.
+ */
+@Getter
+public class SwiftVaultException extends RuntimeException {
+
+    private final HttpStatus status;
+
+    public SwiftVaultException(String message, HttpStatus status) {
+        super(message);
+        this.status = status;
+    }
+
+    // ─── Convenience factory methods ─────────────────────────────────────────
+
+    public static SwiftVaultException badRequest(String message) {
+        return new SwiftVaultException(message, HttpStatus.BAD_REQUEST);
+    }
+
+    public static SwiftVaultException unauthorized(String message) {
+        return new SwiftVaultException(message, HttpStatus.UNAUTHORIZED);
+    }
+
+    public static SwiftVaultException forbidden(String message) {
+        return new SwiftVaultException(message, HttpStatus.FORBIDDEN);
+    }
+
+    public static SwiftVaultException notFound(String message) {
+        return new SwiftVaultException(message, HttpStatus.NOT_FOUND);
+    }
+
+    public static SwiftVaultException conflict(String message) {
+        return new SwiftVaultException(message, HttpStatus.CONFLICT);
+    }
+}
