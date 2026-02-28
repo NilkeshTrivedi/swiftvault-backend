@@ -1,17 +1,8 @@
 package com.swiftvault.backend.dto.response;
 
 import com.swiftvault.backend.entity.User;
-import lombok.Builder;
-import lombok.Data;
-
 import java.time.LocalDateTime;
 
-/**
- * What we return when someone asks for user info.
- * Never exposes passwordHash or pinHash.
- */
-@Data
-@Builder
 public class UserResponse {
     private String userId;
     private String fullName;
@@ -23,17 +14,29 @@ public class UserResponse {
     private LocalDateTime lastLogin;
     private LocalDateTime createdAt;
 
+    public UserResponse() {}
+
     public static UserResponse from(User user) {
-        return UserResponse.builder()
-                .userId(user.getUserId())
-                .fullName(user.getFullName())
-                .email(user.getEmail())
-                .phone(user.getPhone())
-                .role(user.getRole())
-                .status(user.getStatus())
-                .hasTransactionPin(user.hasTransactionPin())
-                .lastLogin(user.getLastLogin())
-                .createdAt(user.getCreatedAt())
-                .build();
+        UserResponse r = new UserResponse();
+        r.userId            = user.getUserId();
+        r.fullName          = user.getFullName();
+        r.email             = user.getEmail();
+        r.phone             = user.getPhone();
+        r.role              = user.getRole();
+        r.status            = user.getStatus();
+        r.hasTransactionPin = user.hasTransactionPin();
+        r.lastLogin         = user.getLastLogin();
+        r.createdAt         = user.getCreatedAt();
+        return r;
     }
+
+    public String          getUserId()           { return userId; }
+    public String          getFullName()         { return fullName; }
+    public String          getEmail()            { return email; }
+    public String          getPhone()            { return phone; }
+    public User.Role       getRole()             { return role; }
+    public User.UserStatus getStatus()           { return status; }
+    public boolean         isHasTransactionPin() { return hasTransactionPin; }
+    public LocalDateTime   getLastLogin()        { return lastLogin; }
+    public LocalDateTime   getCreatedAt()        { return createdAt; }
 }

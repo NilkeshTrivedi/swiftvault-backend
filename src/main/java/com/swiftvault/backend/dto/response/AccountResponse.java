@@ -1,14 +1,9 @@
 package com.swiftvault.backend.dto.response;
 
 import com.swiftvault.backend.entity.Account;
-import lombok.Builder;
-import lombok.Data;
-
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
-@Data
-@Builder
 public class AccountResponse {
     private String accountNumber;
     private String displayName;
@@ -21,18 +16,31 @@ public class AccountResponse {
     private BigDecimal remainingDailyLimit;
     private LocalDateTime createdAt;
 
+    public AccountResponse() {}
+
     public static AccountResponse from(Account account) {
-        return AccountResponse.builder()
-                .accountNumber(account.getAccountNumber())
-                .displayName(account.getDisplayName())
-                .userId(account.getUser().getUserId())
-                .userFullName(account.getUser().getFullName())
-                .balance(account.getBalance())
-                .type(account.getType())
-                .status(account.getStatus())
-                .nickname(account.getNickname())
-                .remainingDailyLimit(account.getRemainingDailyLimit())
-                .createdAt(account.getCreatedAt())
-                .build();
+        AccountResponse r = new AccountResponse();
+        r.accountNumber      = account.getAccountNumber();
+        r.displayName        = account.getDisplayName();
+        r.userId             = account.getUser().getUserId();
+        r.userFullName       = account.getUser().getFullName();
+        r.balance            = account.getBalance();
+        r.type               = account.getType();
+        r.status             = account.getStatus();
+        r.nickname           = account.getNickname();
+        r.remainingDailyLimit= account.getRemainingDailyLimit();
+        r.createdAt          = account.getCreatedAt();
+        return r;
     }
+
+    public String                getAccountNumber()       { return accountNumber; }
+    public String                getDisplayName()         { return displayName; }
+    public String                getUserId()              { return userId; }
+    public String                getUserFullName()        { return userFullName; }
+    public BigDecimal            getBalance()             { return balance; }
+    public Account.AccountType   getType()                { return type; }
+    public Account.AccountStatus getStatus()              { return status; }
+    public String                getNickname()            { return nickname; }
+    public BigDecimal            getRemainingDailyLimit() { return remainingDailyLimit; }
+    public LocalDateTime         getCreatedAt()           { return createdAt; }
 }

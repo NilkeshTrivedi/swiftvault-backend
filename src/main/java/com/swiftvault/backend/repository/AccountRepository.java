@@ -4,6 +4,7 @@ import com.swiftvault.backend.entity.Account;
 import com.swiftvault.backend.entity.User;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.math.BigDecimal;
@@ -19,13 +20,11 @@ public interface AccountRepository extends JpaRepository<Account, String> {
 
     Optional<Account> findByAccountNumber(String accountNumber);
 
-    // Sum all active account balances — used for admin dashboard
-    @Query("SELECT COALESCE(SUM(a.balance), 0) FROM Account a WHERE a.status = 'ACTIVE'")
-    BigDecimal getTotalBankBalance();
+    // Pass enum as parameter — safest approach with EnumType.STRING
+    @Query("SELECT COALESCE(SUM(a.balance), 0) FROM Account a WHERE a.status = :status")
+    BigDecimal getTotalBankBalanceByStatus(@Param("status") Account.AccountStatus status);
 
-    // Count active accounts
     long countByStatus(Account.AccountStatus status);
 
-    // Find all SAVINGS accounts for monthly interest processing
     List<Account> findByTypeAndStatus(Account.AccountType type, Account.AccountStatus status);
 }
