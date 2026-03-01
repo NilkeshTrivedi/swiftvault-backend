@@ -1,6 +1,7 @@
 package com.swiftvault.backend.entity;
 
 import jakarta.persistence.*;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
@@ -20,6 +21,7 @@ import java.util.List;
                 @UniqueConstraint(columnNames = "email", name = "uk_users_email")
         }
 )
+@JsonIgnoreProperties({"passwordHash","pinHash","authorities","accountNonExpired","accountNonLocked","credentialsNonExpired","enabled","password","username"})
 public class User implements UserDetails {
 
     @Id

@@ -1,5 +1,6 @@
 package com.swiftvault.backend.entity;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -8,6 +9,7 @@ import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "accounts")
+@JsonIgnoreProperties({"hibernateLazyInitializer", "handler"})
 public class Account {
 
     public static final BigDecimal SAVINGS_INTEREST_RATE   = new BigDecimal("0.04");
@@ -19,8 +21,10 @@ public class Account {
     @Column(name = "account_number", nullable = false, length = 20)
     private String accountNumber;
 
-    @ManyToOne(fetch = FetchType.LAZY)
+    @ManyToOne(fetch = FetchType.EAGER)
     @JoinColumn(name = "user_id", nullable = false)
+    @JsonIgnoreProperties({"passwordHash", "pinHash", "authorities", "accountNonExpired",
+            "accountNonLocked", "credentialsNonExpired", "enabled"})
     private User user;
 
     @Column(name = "balance", nullable = false, precision = 15, scale = 2)
@@ -63,27 +67,27 @@ public class Account {
     }
 
     // Getters
-    public String        getAccountNumber()      { return accountNumber; }
-    public User          getUser()               { return user; }
-    public BigDecimal    getBalance()            { return balance; }
-    public AccountType   getType()               { return type; }
-    public AccountStatus getStatus()             { return status; }
-    public String        getNickname()           { return nickname; }
-    public BigDecimal    getTodayWithdrawn()     { return todayWithdrawn; }
-    public LocalDate     getWithdrawDate()       { return withdrawDate; }
-    public LocalDateTime getCreatedAt()          { return createdAt; }
-    public LocalDateTime getLastInterestApplied(){ return lastInterestApplied; }
+    public String        getAccountNumber()       { return accountNumber; }
+    public User          getUser()                { return user; }
+    public BigDecimal    getBalance()             { return balance; }
+    public AccountType   getType()                { return type; }
+    public AccountStatus getStatus()              { return status; }
+    public String        getNickname()            { return nickname; }
+    public BigDecimal    getTodayWithdrawn()      { return todayWithdrawn; }
+    public LocalDate     getWithdrawDate()        { return withdrawDate; }
+    public LocalDateTime getCreatedAt()           { return createdAt; }
+    public LocalDateTime getLastInterestApplied() { return lastInterestApplied; }
 
     // Setters
-    public void setAccountNumber(String v)       { this.accountNumber = v; }
-    public void setUser(User v)                  { this.user = v; }
-    public void setBalance(BigDecimal v)         { this.balance = v; }
-    public void setType(AccountType v)           { this.type = v; }
-    public void setStatus(AccountStatus v)       { this.status = v; }
-    public void setNickname(String v)            { this.nickname = v; }
-    public void setTodayWithdrawn(BigDecimal v)  { this.todayWithdrawn = v; }
-    public void setWithdrawDate(LocalDate v)     { this.withdrawDate = v; }
-    public void setCreatedAt(LocalDateTime v)    { this.createdAt = v; }
+    public void setAccountNumber(String v)              { this.accountNumber = v; }
+    public void setUser(User v)                         { this.user = v; }
+    public void setBalance(BigDecimal v)                { this.balance = v; }
+    public void setType(AccountType v)                  { this.type = v; }
+    public void setStatus(AccountStatus v)              { this.status = v; }
+    public void setNickname(String v)                   { this.nickname = v; }
+    public void setTodayWithdrawn(BigDecimal v)         { this.todayWithdrawn = v; }
+    public void setWithdrawDate(LocalDate v)            { this.withdrawDate = v; }
+    public void setCreatedAt(LocalDateTime v)           { this.createdAt = v; }
     public void setLastInterestApplied(LocalDateTime v) { this.lastInterestApplied = v; }
 
     // Business logic
