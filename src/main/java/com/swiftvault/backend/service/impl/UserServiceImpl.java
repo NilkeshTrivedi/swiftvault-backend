@@ -4,7 +4,6 @@ import com.swiftvault.backend.dto.request.*;
 import com.swiftvault.backend.dto.response.AuthResponse;
 import com.swiftvault.backend.dto.response.UserResponse;
 import com.swiftvault.backend.entity.User;
-import com.swiftvault.backend.exception.SwiftVaultException;
 import com.swiftvault.backend.repository.UserRepository;
 import com.swiftvault.backend.security.JwtUtil;
 import com.swiftvault.backend.service.UserService;
@@ -16,6 +15,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
+import com.swiftvault.backend.exception.SwiftVaultException;
 
 @Service
 public class UserServiceImpl implements UserService {
