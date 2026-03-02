@@ -66,12 +66,13 @@ public class FixedDepositServiceImpl implements FixedDepositService {
         account.setBalance(account.getBalance().subtract(request.getAmount()).setScale(2, RoundingMode.HALF_UP));
         accountRepository.save(account);
 
+        // FIX #6: fromAccount was set (correct). Kept as-is — this is a debit from the account.
         Transaction txn = Transaction.builder()
                 .transactionId(IdGenerator.transactionId())
                 .fromAccount(account.getAccountNumber())
                 .type(Transaction.TransactionType.WITHDRAW)
                 .amount(request.getAmount())
-                .description("Fixed Deposit opened")
+                .description("Fixed Deposit opened - FD principal deducted")
                 .build();
         transactionRepository.save(txn);
 
@@ -143,8 +144,12 @@ public class FixedDepositServiceImpl implements FixedDepositService {
         account.setBalance(account.getBalance().add(returnAmount).setScale(2, RoundingMode.HALF_UP));
         accountRepository.save(account);
 
+        // FIX #7: Original code had null fromAccount on this DEPOSIT transaction.
+        // Transaction.fromAccount is NOT NULL in the DB schema — this caused a DB constraint violation.
+        // For FD credit, fromAccount = "FD-SYSTEM" and toAccount = the receiving account.
         Transaction txn = Transaction.builder()
                 .transactionId(IdGenerator.transactionId())
+                .fromAccount("FD-SYSTEM")   // FIX: was null — violates NOT NULL constraint on from_account
                 .toAccount(account.getAccountNumber())
                 .type(Transaction.TransactionType.DEPOSIT)
                 .amount(returnAmount)
@@ -166,6 +171,18 @@ public class FixedDepositServiceImpl implements FixedDepositService {
                 Account account = fd.getSourceAccount();
                 account.setBalance(account.getBalance().add(fd.getMaturityAmount()).setScale(2, RoundingMode.HALF_UP));
                 accountRepository.save(account);
+
+                // FIX #8: Same null fromAccount bug in scheduled job
+                Transaction txn = Transaction.builder()
+                        .transactionId(IdGenerator.transactionId())
+                        .fromAccount("FD-SYSTEM")   // FIX: was null
+                        .toAccount(account.getAccountNumber())
+                        .type(Transaction.TransactionType.DEPOSIT)
+                        .amount(fd.getMaturityAmount())
+                        .description("FD auto-maturity credit - " + fd.getFdId())
+                        .build();
+                transactionRepository.save(txn);
+
                 fd.setStatus(FixedDeposit.FdStatus.MATURED);
                 fd.setActualInterestEarned(fd.getMaturityAmount().subtract(fd.getPrincipalAmount()));
                 fd.setClosedAt(LocalDateTime.now());

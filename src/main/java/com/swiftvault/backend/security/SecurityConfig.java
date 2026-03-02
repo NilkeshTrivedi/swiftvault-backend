@@ -36,6 +36,13 @@ public class SecurityConfig {
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/auth/**").permitAll()
+                        // FIX #11: Public informational endpoints should not require a token.
+                        // Without this, hitting /api/fd/rates, /api/loans/rates, /api/loans/calculate-emi,
+                        // /api/rd/rates from Postman without a token returns 401.
+                        .requestMatchers("/api/fd/rates").permitAll()
+                        .requestMatchers("/api/loans/rates").permitAll()
+                        .requestMatchers("/api/loans/calculate-emi").permitAll()
+                        .requestMatchers("/api/rd/rates").permitAll()
                         .requestMatchers("/api/admin/**").hasRole("ADMIN")
                         .anyRequest().authenticated()
                 )

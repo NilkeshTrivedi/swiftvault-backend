@@ -150,12 +150,15 @@ public class RecurringDepositServiceImpl implements RecurringDepositService {
             rd.setStatus(RecurringDeposit.RdStatus.MATURED);
             account.setBalance(account.getBalance().add(rd.getMaturityAmount()).setScale(2, RoundingMode.HALF_UP));
             accountRepository.save(account);
+
+            // FIX #10: Original code had null fromAccount on maturity credit — violates NOT NULL constraint
             Transaction matTxn = Transaction.builder()
                     .transactionId(IdGenerator.transactionId())
+                    .fromAccount("RD-SYSTEM")   // FIX: was null
                     .toAccount(account.getAccountNumber())
                     .type(Transaction.TransactionType.DEPOSIT)
                     .amount(rd.getMaturityAmount())
-                    .description("RD maturity credit")
+                    .description("RD maturity credit - " + rd.getRdId())
                     .build();
             transactionRepository.save(matTxn);
             rd.setClosedAt(LocalDateTime.now());
@@ -182,8 +185,10 @@ public class RecurringDepositServiceImpl implements RecurringDepositService {
         account.setBalance(account.getBalance().add(rd.getTotalDeposited()).setScale(2, RoundingMode.HALF_UP));
         accountRepository.save(account);
 
+        // FIX: Same null fromAccount pattern — also fixed here for consistency
         Transaction txn = Transaction.builder()
                 .transactionId(IdGenerator.transactionId())
+                .fromAccount("RD-SYSTEM")   // FIX: was null
                 .toAccount(account.getAccountNumber())
                 .type(Transaction.TransactionType.DEPOSIT)
                 .amount(rd.getTotalDeposited())
@@ -220,11 +225,22 @@ public class RecurringDepositServiceImpl implements RecurringDepositService {
                     rd.setStatus(RecurringDeposit.RdStatus.MATURED);
                     account.setBalance(account.getBalance().add(rd.getMaturityAmount()).setScale(2, RoundingMode.HALF_UP));
                     accountRepository.save(account);
+
+                    // FIX: Null fromAccount in scheduled job also fixed
+                    Transaction matTxn = Transaction.builder()
+                            .transactionId(IdGenerator.transactionId())
+                            .fromAccount("RD-SYSTEM")   // FIX: was null
+                            .toAccount(account.getAccountNumber())
+                            .type(Transaction.TransactionType.DEPOSIT)
+                            .amount(rd.getMaturityAmount())
+                            .description("RD auto-maturity credit - " + rd.getRdId())
+                            .build();
+                    transactionRepository.save(matTxn);
                     rd.setClosedAt(LocalDateTime.now());
                 }
                 rdRepository.save(rd);
             } catch (Exception e) {
-                log.warning("Failed auto-debit for RD: " + rd.getRdId());
+                log.warning("Failed auto-debit for RD: " + rd.getRdId() + " - " + e.getMessage());
             }
         }
     }

@@ -166,12 +166,15 @@ public class LoanServiceImpl implements LoanService {
         account.setBalance(account.getBalance().add(loan.getLoanAmount()).setScale(2, RoundingMode.HALF_UP));
         accountRepository.save(account);
 
+        // FIX #9: Original had null fromAccount — violates NOT NULL constraint on from_account column.
+        // Loan disbursals originate from the bank, not from a user account.
         Transaction txn = Transaction.builder()
                 .transactionId(IdGenerator.transactionId())
+                .fromAccount("LOAN-SYSTEM")   // FIX: was null — DB constraint violation
                 .toAccount(account.getAccountNumber())
                 .type(Transaction.TransactionType.DEPOSIT)
                 .amount(loan.getLoanAmount())
-                .description("Loan disbursed - " + loan.getLoanType())
+                .description("Loan disbursed - " + loan.getLoanType() + " (" + loan.getLoanId() + ")")
                 .build();
         transactionRepository.save(txn);
 

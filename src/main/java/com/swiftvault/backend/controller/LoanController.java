@@ -5,12 +5,12 @@ import com.swiftvault.backend.dto.request.PayEmiRequest;
 import com.swiftvault.backend.dto.response.ApiResponse;
 import com.swiftvault.backend.dto.response.LoanResponse;
 import com.swiftvault.backend.entity.Loan;
+import com.swiftvault.backend.entity.User;
 import com.swiftvault.backend.service.LoanService;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.web.bind.annotation.*;
 import java.math.BigDecimal;
 import java.util.LinkedHashMap;
@@ -27,38 +27,41 @@ public class LoanController {
         this.loanService = loanService;
     }
 
+    // FIX #4: Changed @AuthenticationPrincipal from UserDetails to User entity
+    // Same root cause as CardController/FD Controller
+
     @PostMapping("/apply")
     public ResponseEntity<ApiResponse<LoanResponse>> applyForLoan(
-            @AuthenticationPrincipal UserDetails userDetails,
+            @AuthenticationPrincipal User user,
             @Valid @RequestBody LoanApplicationRequest request) {
-        LoanResponse response = loanService.applyForLoan(userDetails.getUsername(), request);
+        LoanResponse response = loanService.applyForLoan(user.getUserId(), request);
         return ResponseEntity.ok(ApiResponse.success("Loan application submitted successfully", response));
     }
 
     @GetMapping
     public ResponseEntity<ApiResponse<List<LoanResponse>>> getMyLoans(
-            @AuthenticationPrincipal UserDetails userDetails) {
-        List<LoanResponse> loans = loanService.getMyLoans(userDetails.getUsername());
+            @AuthenticationPrincipal User user) {
+        List<LoanResponse> loans = loanService.getMyLoans(user.getUserId());
         return ResponseEntity.ok(ApiResponse.success("Loans retrieved", loans));
     }
 
     @GetMapping("/{loanId}")
     public ResponseEntity<ApiResponse<LoanResponse>> getLoan(
-            @AuthenticationPrincipal UserDetails userDetails,
+            @AuthenticationPrincipal User user,
             @PathVariable String loanId) {
-        LoanResponse loan = loanService.getLoan(userDetails.getUsername(), loanId);
+        LoanResponse loan = loanService.getLoan(user.getUserId(), loanId);
         return ResponseEntity.ok(ApiResponse.success("Loan retrieved", loan));
     }
 
     @PostMapping("/pay-emi")
     public ResponseEntity<ApiResponse<LoanResponse>> payEmi(
-            @AuthenticationPrincipal UserDetails userDetails,
+            @AuthenticationPrincipal User user,
             @Valid @RequestBody PayEmiRequest request) {
-        LoanResponse response = loanService.payEmi(userDetails.getUsername(), request);
+        LoanResponse response = loanService.payEmi(user.getUserId(), request);
         return ResponseEntity.ok(ApiResponse.success("EMI paid successfully", response));
     }
 
-    // EMI Calculator - public endpoint
+    // EMI Calculator - public endpoint (no auth needed)
     @GetMapping("/calculate-emi")
     public ResponseEntity<ApiResponse<Object>> calculateEmi(
             @RequestParam BigDecimal amount,
