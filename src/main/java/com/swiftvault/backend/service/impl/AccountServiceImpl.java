@@ -1,311 +1,370 @@
 package com.swiftvault.backend.service.impl;
 
-import com.swiftvault.backend.dto.request.*;
+import com.swiftvault.backend.dto.request.DepositRequest;
+import com.swiftvault.backend.dto.request.OpenAccountRequest;
+import com.swiftvault.backend.dto.request.TransferRequest;
+import com.swiftvault.backend.dto.request.WithdrawRequest;
 import com.swiftvault.backend.dto.response.AccountResponse;
-import com.swiftvault.backend.dto.response.DashboardResponse;
 import com.swiftvault.backend.dto.response.TransactionResponse;
-import com.swiftvault.backend.entity.Account;
-import com.swiftvault.backend.entity.Transaction;
-import com.swiftvault.backend.entity.User;
+import com.swiftvault.backend.entity.*;
 import com.swiftvault.backend.exception.SwiftVaultException;
 import com.swiftvault.backend.repository.AccountRepository;
 import com.swiftvault.backend.repository.TransactionRepository;
-import com.swiftvault.backend.repository.UserRepository;
-import com.swiftvault.backend.service.AccountService;
-import com.swiftvault.backend.service.UserService;
+import com.swiftvault.backend.service.*;
 import com.swiftvault.backend.util.IdGenerator;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Lazy;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.io.PrintWriter;
+
+import jakarta.persistence.LockModeType;
 import java.math.BigDecimal;
-import java.nio.file.Files;
-import java.nio.file.Paths;
+import java.math.RoundingMode;
 import java.util.List;
-import java.util.logging.Logger;
-import java.util.stream.Collectors;
 
 @Service
 public class AccountServiceImpl implements AccountService {
 
-    private static final Logger log = Logger.getLogger(AccountServiceImpl.class.getName());
+    private final AccountRepository       accountRepository;
+    private final TransactionRepository   transactionRepository;
+    private final UserService             userService;
+    private final PasswordEncoder         passwordEncoder;
 
-    private final AccountRepository     accountRepository;
-    private final TransactionRepository transactionRepository;
-    private final UserRepository        userRepository;
-    private final UserService           userService;
+    // ── Phase 3B services (wired for fraud, limits, savings, alerts, referral) ─
+    private final FraudDetectionService   fraudDetectionService;
+    private final TransactionLimitService transactionLimitService;
+    private final AutoSavingsService      autoSavingsService;
+    private final LowBalanceAlertService  lowBalanceAlertService;
+    private final ReferralService         referralService;
 
-    @Autowired
     public AccountServiceImpl(AccountRepository accountRepository,
                               TransactionRepository transactionRepository,
-                              UserRepository userRepository,
-                              @Lazy UserService userService) {
+                              UserService userService,
+                              PasswordEncoder passwordEncoder,
+                              FraudDetectionService fraudDetectionService,
+                              TransactionLimitService transactionLimitService,
+                              AutoSavingsService autoSavingsService,
+                              LowBalanceAlertService lowBalanceAlertService,
+                              ReferralService referralService) {
         this.accountRepository     = accountRepository;
         this.transactionRepository = transactionRepository;
-        this.userRepository        = userRepository;
         this.userService           = userService;
+        this.passwordEncoder       = passwordEncoder;
+        this.fraudDetectionService = fraudDetectionService;
+        this.transactionLimitService = transactionLimitService;
+        this.autoSavingsService    = autoSavingsService;
+        this.lowBalanceAlertService = lowBalanceAlertService;
+        this.referralService       = referralService;
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Open Account
+    // ─────────────────────────────────────────────────────────────────────────
 
     @Override
     @Transactional
     public AccountResponse openAccount(String userId, OpenAccountRequest request) {
         User user = userService.findById(userId);
-        if (request.getType() == Account.AccountType.SAVINGS &&
-                request.getInitialDeposit().compareTo(Account.MINIMUM_BALANCE_SAVINGS) < 0)
-            throw SwiftVaultException.badRequest("SAVINGS account requires minimum deposit of " + Account.MINIMUM_BALANCE_SAVINGS);
 
-        Account account = Account.builder()
-                .accountNumber(IdGenerator.accountNumber())
-                .user(user).balance(request.getInitialDeposit())
-                .type(request.getType()).status(Account.AccountStatus.ACTIVE).build();
-        accountRepository.save(account);
+        // Validate account type
+        if (request.getAccountType() == null)
+            throw SwiftVaultException.badRequest("Account type is required");
 
-        if (request.getInitialDeposit().compareTo(BigDecimal.ZERO) > 0)
-            recordTransaction(account.getAccountNumber(), null, Transaction.TransactionType.DEPOSIT,
-                    request.getInitialDeposit(), "Initial deposit");
+        // Generate unique account number
+        String accountNumber;
+        do {
+            accountNumber = IdGenerator.accountNumber();
+        } while (accountRepository.existsByAccountNumber(accountNumber));
 
-        log.info("Account opened: " + account.getAccountNumber() + " for user: " + userId);
-        return AccountResponse.from(account);
+        Account account = new Account();
+        account.setAccountNumber(accountNumber);
+        account.setUser(user);
+        account.setAccountType(request.getAccountType());
+        account.setBalance(BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP));
+        account.setStatus(Account.AccountStatus.ACTIVE);
+
+        Account saved = accountRepository.save(account);
+
+        // ── Phase 3B: Trigger referral reward on first account open ──────────
+        referralService.onFirstAccountOpened(user, saved);
+
+        return AccountResponse.from(saved);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Get My Accounts
+    // ─────────────────────────────────────────────────────────────────────────
 
     @Override
     public List<AccountResponse> getMyAccounts(String userId) {
         User user = userService.findById(userId);
-        return accountRepository.findByUser(user).stream().map(AccountResponse::from).collect(Collectors.toList());
+        return accountRepository.findByUser(user)
+                .stream().map(AccountResponse::from).toList();
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Get Account By Number
+    // ─────────────────────────────────────────────────────────────────────────
 
     @Override
     public AccountResponse getAccount(String userId, String accountNumber) {
-        return AccountResponse.from(findAndVerifyOwnership(userId, accountNumber, "view"));
+        Account account = findAndVerifyOwnership(userId, accountNumber);
+        return AccountResponse.from(account);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Deposit
+    // ─────────────────────────────────────────────────────────────────────────
 
     @Override
     @Transactional
-    public void setNickname(String userId, String accountNumber, String nickname) {
-        Account account = findAndVerifyOwnership(userId, accountNumber, "rename");
-        account.setNickname(nickname);
+    public TransactionResponse deposit(String userId, String accountNumber,
+                                       DepositRequest request) {
+        Account account = findAndVerifyOwnership(userId, accountNumber);
+
+        if (account.getStatus() != Account.AccountStatus.ACTIVE)
+            throw SwiftVaultException.badRequest("Account is not active. Status: " + account.getStatus());
+
+        BigDecimal amount = request.getAmount();
+        if (amount.compareTo(BigDecimal.ZERO) <= 0)
+            throw SwiftVaultException.badRequest("Deposit amount must be greater than zero");
+
+        // ── Update balance ────────────────────────────────────────────────────
+        account.setBalance(account.getBalance().add(amount).setScale(2, RoundingMode.HALF_UP));
         accountRepository.save(account);
+
+        // ── Record transaction ────────────────────────────────────────────────
+        Transaction txn = Transaction.builder()
+                .transactionId(IdGenerator.transactionId())
+                .toAccount(accountNumber)
+                .type(Transaction.TransactionType.DEPOSIT)
+                .amount(amount)
+                .description(request.getDescription() != null
+                        ? request.getDescription() : "Deposit")
+                .build();
+        transactionRepository.save(txn);
+
+        return TransactionResponse.from(txn, account.getBalance());
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Withdraw
+    // ─────────────────────────────────────────────────────────────────────────
 
     @Override
     @Transactional
-    public TransactionResponse deposit(String userId, DepositRequest request) {
-        Account account = findActiveAndVerifyOwnership(userId, request.getAccountNumber(), "deposit into");
-        account.deposit(request.getAmount());
+    public TransactionResponse withdraw(String userId, String accountNumber,
+                                        WithdrawRequest request) {
+        // Pessimistic lock prevents race conditions on the same account
+        Account account = accountRepository.findByAccountNumberWithLock(accountNumber,
+                        LockModeType.PESSIMISTIC_WRITE)
+                .orElseThrow(() -> SwiftVaultException.notFound("Account not found: " + accountNumber));
+
+        if (!account.getUser().getUserId().equals(userId))
+            throw SwiftVaultException.forbidden("You don't own this account");
+        if (account.getStatus() != Account.AccountStatus.ACTIVE)
+            throw SwiftVaultException.badRequest("Account is not active. Status: " + account.getStatus());
+
+        User user = userService.findById(userId);
+        verifyTransactionPin(user, request.getTransactionPin());
+
+        BigDecimal amount = request.getAmount();
+        if (amount.compareTo(BigDecimal.ZERO) <= 0)
+            throw SwiftVaultException.badRequest("Withdrawal amount must be greater than zero");
+        if (account.getBalance().compareTo(amount) < 0)
+            throw SwiftVaultException.badRequest("Insufficient balance. Available: ₹" +
+                    account.getBalance().toPlainString());
+
+        // ── Phase 3B: Enforce transaction limits BEFORE any balance change ────
+        transactionLimitService.enforceLimit(accountNumber, amount);
+
+        // ── Update balance ────────────────────────────────────────────────────
+        account.setBalance(account.getBalance().subtract(amount).setScale(2, RoundingMode.HALF_UP));
         accountRepository.save(account);
-        Transaction txn = recordTransaction(account.getAccountNumber(), null,
-                Transaction.TransactionType.DEPOSIT, request.getAmount(),
-                request.getDescription() != null ? request.getDescription() : "Deposit");
-        return TransactionResponse.from(txn);
+
+        // ── Record transaction ────────────────────────────────────────────────
+        Transaction txn = Transaction.builder()
+                .transactionId(IdGenerator.transactionId())
+                .fromAccount(accountNumber)
+                .type(Transaction.TransactionType.WITHDRAW)
+                .amount(amount)
+                .description(request.getDescription() != null
+                        ? request.getDescription() : "Withdrawal")
+                .build();
+        transactionRepository.save(txn);
+
+        // ── Phase 3B: Post-transaction hooks (all silent — never throw) ───────
+        runPostDebitHooks(user, account, amount, Transaction.TransactionType.WITHDRAW);
+
+        return TransactionResponse.from(txn, account.getBalance());
     }
 
-    @Override
-    @Transactional
-    public TransactionResponse withdraw(String userId, WithdrawRequest request) {
-        userService.verifyTransactionPin(userId, request.getTransactionPin());
-        Account account = findActiveAndVerifyOwnership(userId, request.getAccountNumber(), "withdraw from");
-        handleWithdrawResult(account.withdrawWithChecks(request.getAmount()), account);
-        accountRepository.save(account);
-        Transaction txn = recordTransaction(account.getAccountNumber(), null,
-                Transaction.TransactionType.WITHDRAW, request.getAmount(),
-                request.getDescription() != null ? request.getDescription() : "Withdrawal");
-        return TransactionResponse.from(txn);
-    }
+    // ─────────────────────────────────────────────────────────────────────────
+    // Transfer
+    // ─────────────────────────────────────────────────────────────────────────
 
     @Override
     @Transactional
     public TransactionResponse transfer(String userId, TransferRequest request) {
-        userService.verifyTransactionPin(userId, request.getTransactionPin());
-        String toAccountNumber = resolveDestinationAccount(request);
-        if (request.getFromAccount().equals(toAccountNumber))
-            throw SwiftVaultException.badRequest("Cannot transfer to the same account.");
+        String fromAccountNumber = request.getFromAccount();
+        String toAccountNumber   = request.getToAccount();
 
-        Account from = findActiveAndVerifyOwnership(userId, request.getFromAccount(), "transfer from");
-        Account to   = findActiveAccount(toAccountNumber);
-        handleWithdrawResult(from.withdrawWithChecks(request.getAmount()), from);
-        to.deposit(request.getAmount());
-        accountRepository.save(from);
-        accountRepository.save(to);
-        Transaction txn = recordTransaction(from.getAccountNumber(), to.getAccountNumber(),
-                Transaction.TransactionType.TRANSFER, request.getAmount(),
-                request.getDescription() != null ? request.getDescription() : "Transfer");
-        return TransactionResponse.from(txn);
+        if (fromAccountNumber.equals(toAccountNumber))
+            throw SwiftVaultException.badRequest("Cannot transfer to the same account");
+
+        // Pessimistic lock on both accounts — always lock in consistent order
+        // (lower account number first) to prevent deadlocks
+        String first  = fromAccountNumber.compareTo(toAccountNumber) < 0
+                ? fromAccountNumber : toAccountNumber;
+        String second = first.equals(fromAccountNumber) ? toAccountNumber : fromAccountNumber;
+
+        Account firstLocked = accountRepository.findByAccountNumberWithLock(first,
+                        LockModeType.PESSIMISTIC_WRITE)
+                .orElseThrow(() -> SwiftVaultException.notFound("Account not found: " + first));
+        Account secondLocked = accountRepository.findByAccountNumberWithLock(second,
+                        LockModeType.PESSIMISTIC_WRITE)
+                .orElseThrow(() -> SwiftVaultException.notFound("Account not found: " + second));
+
+        Account fromAccount = first.equals(fromAccountNumber) ? firstLocked : secondLocked;
+        Account toAccount   = first.equals(fromAccountNumber) ? secondLocked : firstLocked;
+
+        if (!fromAccount.getUser().getUserId().equals(userId))
+            throw SwiftVaultException.forbidden("You don't own the source account");
+        if (fromAccount.getStatus() != Account.AccountStatus.ACTIVE)
+            throw SwiftVaultException.badRequest("Source account is not active. Status: " + fromAccount.getStatus());
+        if (toAccount.getStatus() != Account.AccountStatus.ACTIVE)
+            throw SwiftVaultException.badRequest("Destination account is not active");
+
+        User user = userService.findById(userId);
+        verifyTransactionPin(user, request.getTransactionPin());
+
+        BigDecimal amount = request.getAmount();
+        if (amount.compareTo(BigDecimal.ZERO) <= 0)
+            throw SwiftVaultException.badRequest("Transfer amount must be greater than zero");
+        if (fromAccount.getBalance().compareTo(amount) < 0)
+            throw SwiftVaultException.badRequest("Insufficient balance. Available: ₹" +
+                    fromAccount.getBalance().toPlainString());
+
+        // ── Phase 3B: Enforce transaction limits BEFORE any balance change ────
+        transactionLimitService.enforceLimit(fromAccountNumber, amount);
+
+        // ── Update balances ───────────────────────────────────────────────────
+        fromAccount.setBalance(fromAccount.getBalance().subtract(amount).setScale(2, RoundingMode.HALF_UP));
+        toAccount.setBalance(toAccount.getBalance().add(amount).setScale(2, RoundingMode.HALF_UP));
+        accountRepository.save(fromAccount);
+        accountRepository.save(toAccount);
+
+        // ── Record transaction ────────────────────────────────────────────────
+        Transaction txn = Transaction.builder()
+                .transactionId(IdGenerator.transactionId())
+                .fromAccount(fromAccountNumber)
+                .toAccount(toAccountNumber)
+                .type(Transaction.TransactionType.TRANSFER)
+                .amount(amount)
+                .description(request.getDescription() != null
+                        ? request.getDescription() : "Transfer")
+                .build();
+        transactionRepository.save(txn);
+
+        // ── Phase 3B: Post-transaction hooks (all silent — never throw) ───────
+        runPostDebitHooks(user, fromAccount, amount, Transaction.TransactionType.TRANSFER);
+
+        return TransactionResponse.from(txn, fromAccount.getBalance());
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Get Transaction History
+    // ─────────────────────────────────────────────────────────────────────────
 
     @Override
     public List<TransactionResponse> getTransactionHistory(String userId, String accountNumber) {
-        findAndVerifyOwnership(userId, accountNumber, "view transactions of");
-        return transactionRepository.findByAccountNumber(accountNumber).stream()
-                .map(TransactionResponse::from).collect(Collectors.toList());
+        findAndVerifyOwnership(userId, accountNumber); // ownership check
+        return transactionRepository.findByAccountNumber(accountNumber)
+                .stream()
+                .sorted((a, b) -> b.getTimestamp().compareTo(a.getTimestamp()))
+                .map(t -> TransactionResponse.from(t, null))
+                .toList();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Admin — Freeze / Unfreeze
+    // ─────────────────────────────────────────────────────────────────────────
+
+    @Override
+    @Transactional
+    public AccountResponse freezeAccount(String accountNumber, String reason) {
+        Account account = accountRepository.findByAccountNumber(accountNumber)
+                .orElseThrow(() -> SwiftVaultException.notFound("Account not found: " + accountNumber));
+        if (account.getStatus() == Account.AccountStatus.FROZEN)
+            throw SwiftVaultException.badRequest("Account is already frozen");
+        account.setStatus(Account.AccountStatus.FROZEN);
+        return AccountResponse.from(accountRepository.save(account));
     }
 
     @Override
-    public List<TransactionResponse> getMiniStatement(String userId, String accountNumber) {
-        findAndVerifyOwnership(userId, accountNumber, "view transactions of");
-        return transactionRepository.findTop5ByAccountNumber(accountNumber).stream()
-                .map(TransactionResponse::from).collect(Collectors.toList());
-    }
-
-    @Override
-    public List<TransactionResponse> getFilteredHistory(String userId, String accountNumber, String type) {
-        findAndVerifyOwnership(userId, accountNumber, "view transactions of");
-        Transaction.TransactionType txnType;
-        try { txnType = Transaction.TransactionType.valueOf(type.toUpperCase()); }
-        catch (IllegalArgumentException e) { throw SwiftVaultException.badRequest("Invalid type: " + type); }
-        return transactionRepository.findByAccountNumberAndType(accountNumber, txnType).stream()
-                .map(TransactionResponse::from).collect(Collectors.toList());
+    @Transactional
+    public AccountResponse unfreezeAccount(String accountNumber) {
+        Account account = accountRepository.findByAccountNumber(accountNumber)
+                .orElseThrow(() -> SwiftVaultException.notFound("Account not found: " + accountNumber));
+        if (account.getStatus() != Account.AccountStatus.FROZEN)
+            throw SwiftVaultException.badRequest("Account is not frozen");
+        account.setStatus(Account.AccountStatus.ACTIVE);
+        return AccountResponse.from(accountRepository.save(account));
     }
 
     @Override
     public List<AccountResponse> getAllAccounts() {
-        return accountRepository.findAll().stream().map(AccountResponse::from).collect(Collectors.toList());
+        return accountRepository.findAll()
+                .stream().map(AccountResponse::from).toList();
     }
 
-    @Override
-    @Transactional
-    public void freezeAccount(String accountNumber) {
-        Account account = findActiveAccount(accountNumber);
-        account.setStatus(Account.AccountStatus.FROZEN);
-        accountRepository.save(account);
-    }
+    // ─────────────────────────────────────────────────────────────────────────
+    // Private Helpers
+    // ─────────────────────────────────────────────────────────────────────────
 
-    @Override
-    @Transactional
-    public void unfreezeAccount(String accountNumber) {
-        Account account = accountRepository.findByAccountNumber(accountNumber)
-                .orElseThrow(() -> SwiftVaultException.notFound("Account not found: " + accountNumber));
-        account.setStatus(Account.AccountStatus.ACTIVE);
-        accountRepository.save(account);
-    }
-
-    @Override
-    @Transactional
-    public void closeAccount(String accountNumber) {
-        Account account = accountRepository.findByAccountNumber(accountNumber)
-                .orElseThrow(() -> SwiftVaultException.notFound("Account not found: " + accountNumber));
-        if (account.getBalance().compareTo(BigDecimal.ZERO) > 0)
-            throw SwiftVaultException.badRequest("Cannot close account with balance. Withdraw first.");
-        account.setStatus(Account.AccountStatus.CLOSED);
-        accountRepository.save(account);
-    }
-
-    @Override
-    @Transactional
-    public void applyMonthlyInterest() {
-        List<Account> accounts = accountRepository.findByTypeAndStatus(
-                Account.AccountType.SAVINGS, Account.AccountStatus.ACTIVE);
-        for (Account account : accounts) {
-            BigDecimal interest = account.getBalance().multiply(Account.SAVINGS_INTEREST_RATE)
-                    .divide(BigDecimal.valueOf(12), 2, java.math.RoundingMode.HALF_UP);
-            account.deposit(interest);
-            account.setLastInterestApplied(java.time.LocalDateTime.now());
-            accountRepository.save(account);
-            recordTransaction(account.getAccountNumber(), null,
-                    Transaction.TransactionType.DEPOSIT, interest, "Monthly interest @ 4% p.a.");
-        }
-    }
-
-    @Override
-    @Transactional
-    public void applyLowBalanceFees() {
-        List<Account> accounts = accountRepository.findByTypeAndStatus(
-                Account.AccountType.SAVINGS, Account.AccountStatus.ACTIVE);
-        for (Account account : accounts) {
-            if (account.getBalance().compareTo(Account.MINIMUM_BALANCE_SAVINGS) < 0) {
-                account.withdraw(Account.LOW_BALANCE_FEE);
-                accountRepository.save(account);
-                recordTransaction(account.getAccountNumber(), null,
-                        Transaction.TransactionType.WITHDRAW, Account.LOW_BALANCE_FEE, "Low balance fee");
-            }
-        }
-    }
-
-    @Override
-    public DashboardResponse getDashboard() {
-        return DashboardResponse.builder()
-                .totalUsers(userRepository.count())
-                .activeUsers(userRepository.findAll().stream()
-                        .filter(u -> u.getStatus() == User.UserStatus.ACTIVE).count())
-                .totalAccounts(accountRepository.count())
-                .activeAccounts(accountRepository.countByStatus(Account.AccountStatus.ACTIVE))
-                .totalTransactions(transactionRepository.count())
-                .totalBankBalance(accountRepository.getTotalBankBalanceByStatus(Account.AccountStatus.ACTIVE))
-                .build();
-    }
-
-    @Override
-    public void exportTransactionsCsv(String filePath) {
-        try {
-            Files.createDirectories(Paths.get("exports"));
-            List<Transaction> txns = transactionRepository.findAll();
-            try (PrintWriter pw = new PrintWriter(new FileWriter(filePath))) {
-                pw.println("Transaction ID,From Account,To Account,Type,Amount,Description,Timestamp");
-                for (Transaction t : txns) {
-                    pw.printf("%s,%s,%s,%s,%.2f,%s,%s%n",
-                            t.getTransactionId(), t.getFromAccount(),
-                            t.getToAccount() != null ? t.getToAccount() : "",
-                            t.getType(), t.getAmount(),
-                            t.getDescription() != null ? t.getDescription().replace(",", ";") : "",
-                            t.getTimestamp());
-                }
-            }
-        } catch (IOException e) {
-            throw SwiftVaultException.badRequest("Failed to export CSV: " + e.getMessage());
-        }
-    }
-
-    private Account findAndVerifyOwnership(String userId, String accountNumber, String action) {
+    private Account findAndVerifyOwnership(String userId, String accountNumber) {
         Account account = accountRepository.findByAccountNumber(accountNumber)
                 .orElseThrow(() -> SwiftVaultException.notFound("Account not found: " + accountNumber));
         if (!account.getUser().getUserId().equals(userId))
-            throw SwiftVaultException.forbidden("You do not have permission to " + action + " account " + accountNumber);
+            throw SwiftVaultException.forbidden("You don't own this account");
         return account;
     }
 
-    private Account findActiveAndVerifyOwnership(String userId, String accountNumber, String action) {
-        Account account = findAndVerifyOwnership(userId, accountNumber, action);
-        if (account.getStatus() != Account.AccountStatus.ACTIVE)
-            throw SwiftVaultException.badRequest("Account " + accountNumber + " is " + account.getStatus());
-        return account;
+    private void verifyTransactionPin(User user, String pin) {
+        if (!user.hasTransactionPin())
+            throw SwiftVaultException.badRequest(
+                    "Transaction PIN not set. Please set a PIN before making transactions.");
+        if (pin == null || pin.isBlank())
+            throw SwiftVaultException.badRequest("Transaction PIN is required");
+        if (!passwordEncoder.matches(pin, user.getPinHash()))
+            throw SwiftVaultException.unauthorized("Incorrect transaction PIN");
     }
 
-    private Account findActiveAccount(String accountNumber) {
-        Account account = accountRepository.findByAccountNumber(accountNumber)
-                .orElseThrow(() -> SwiftVaultException.notFound("Account not found: " + accountNumber));
-        if (account.getStatus() != Account.AccountStatus.ACTIVE)
-            throw SwiftVaultException.badRequest("Account " + accountNumber + " is " + account.getStatus());
-        return account;
-    }
-
-    private void handleWithdrawResult(String result, Account account) {
-        switch (result) {
-            case "INSUFFICIENT" -> throw SwiftVaultException.badRequest("Insufficient balance. Available: " + account.getBalance());
-            case "DAILY_LIMIT"  -> throw SwiftVaultException.badRequest("Daily limit reached. Remaining: " + account.getRemainingDailyLimit());
-            case "MIN_BALANCE"  -> throw SwiftVaultException.badRequest("SAVINGS minimum balance: " + Account.MINIMUM_BALANCE_SAVINGS);
+    /**
+     * Runs after every successful debit (withdraw or transfer).
+     * All three hooks are wrapped individually — one failure never breaks others.
+     * This method itself never throws.
+     */
+    private void runPostDebitHooks(User user, Account account,
+                                   BigDecimal amount, Transaction.TransactionType type) {
+        // 1. Fraud detection — risk-scores the transaction and creates alerts
+        try {
+            fraudDetectionService.analyzeTransaction(user, account, amount, type);
+        } catch (Exception e) {
+            // logged inside FraudDetectionService — never propagate
         }
-    }
 
-    private String resolveDestinationAccount(TransferRequest request) {
-        if (request.getToAccount() != null && !request.getToAccount().isBlank()) return request.getToAccount();
-        if (request.getToEmail() != null && !request.getToEmail().isBlank()) {
-            User recipient = userRepository.findByEmail(request.getToEmail())
-                    .orElseThrow(() -> SwiftVaultException.notFound("No user found with email: " + request.getToEmail()));
-            List<Account> accounts = accountRepository.findByUserAndStatus(recipient, Account.AccountStatus.ACTIVE);
-            if (accounts.isEmpty()) throw SwiftVaultException.badRequest("Recipient has no active accounts.");
-            return accounts.get(0).getAccountNumber();
+        // 2. Low balance alert — fires if balance < user's configured threshold
+        try {
+            lowBalanceAlertService.checkAndAlert(account);
+        } catch (Exception e) {
+            // silent
         }
-        throw SwiftVaultException.badRequest("Provide either toAccount or toEmail.");
-    }
 
-    private Transaction recordTransaction(String from, String to,
-                                          Transaction.TransactionType type, BigDecimal amount, String description) {
-        Transaction txn = Transaction.builder()
-                .transactionId(IdGenerator.transactionId())
-                .fromAccount(from).toAccount(to)
-                .type(type).amount(amount).description(description).build();
-        return transactionRepository.save(txn);
+        // 3. Round-up auto savings — sweeps round-up difference to linked goal
+        try {
+            autoSavingsService.applyRoundUp(account.getAccountNumber(), amount);
+        } catch (Exception e) {
+            // silent
+        }
     }
 }
