@@ -1,4 +1,4 @@
-package com.swiftvault.backend.scheduler;
+package com.swiftvault.backend.util;
 
 import com.swiftvault.backend.entity.*;
 import com.swiftvault.backend.repository.*;
@@ -18,29 +18,21 @@ import java.util.logging.Logger;
 /**
  * All scheduled background jobs for SwiftVault.
  *
- * Jobs:
- *   1. Fixed Deposit maturity check     — runs daily at 8:00 AM
- *   2. Recurring Deposit installments   — runs daily at 8:30 AM
- *   3. Loan EMI deductions              — runs daily at 9:00 AM
- *   4. Monthly auto-savings (recurring) — runs on 1st of month at 8:00 AM
- *   5. Nightly low-balance scan         — runs daily at 11:30 PM
- *   6. Referral expiry cleanup          — runs weekly on Sunday at 2:00 AM
- *
- * Requires @EnableScheduling on SwiftVaultApplication.java
+ * Requires @EnableScheduling on SwiftVaultApplication (already present).
  */
 @Component
 public class ScheduledJobs {
 
     private static final Logger log = Logger.getLogger(ScheduledJobs.class.getName());
 
-    private final FixedDepositRepository   fixedDepositRepository;
+    private final FixedDepositRepository    fixedDepositRepository;
     private final RecurringDepositRepository recurringDepositRepository;
-    private final LoanRepository           loanRepository;
-    private final AccountRepository        accountRepository;
-    private final TransactionRepository    transactionRepository;
-    private final ReferralRepository       referralRepository;
-    private final AutoSavingsService       autoSavingsService;
-    private final LowBalanceAlertService   lowBalanceAlertService;
+    private final LoanRepository            loanRepository;
+    private final AccountRepository         accountRepository;
+    private final TransactionRepository     transactionRepository;
+    private final ReferralRepository        referralRepository;
+    private final AutoSavingsService        autoSavingsService;
+    private final LowBalanceAlertService    lowBalanceAlertService;
 
     public ScheduledJobs(FixedDepositRepository fixedDepositRepository,
                          RecurringDepositRepository recurringDepositRepository,
@@ -61,27 +53,23 @@ public class ScheduledJobs {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 1. Fixed Deposit Maturity Check
-    //    Runs daily at 8:00 AM
-    //    Finds all ACTIVE FDs that have passed their maturity date
-    //    Credits principal + interest to the linked account
+    // 1. Fixed Deposit Maturity — daily at 8:00 AM
     // ─────────────────────────────────────────────────────────────────────────
 
     @Scheduled(cron = "0 0 8 * * *")
     @Transactional
     public void processFixedDepositMaturities() {
         log.info("=== FD Maturity Job START ===");
-        int processed = 0;
-        int failed    = 0;
+        int processed = 0, failed = 0;
 
-        List<FixedDeposit> matured = fixedDepositRepository
-                .findByStatusAndMaturityDateBefore(FixedDeposit.FdStatus.ACTIVE, LocalDate.now());
+        // FIX: use findMaturedFds(LocalDate) — the actual query method in FixedDepositRepository
+        List<FixedDeposit> matured = fixedDepositRepository.findMaturedFds(LocalDate.now());
 
         for (FixedDeposit fd : matured) {
             try {
-                Account account = accountRepository
-                        .findByAccountNumber(fd.getLinkedAccountNumber())
-                        .orElse(null);
+                // FIX: fd.getSourceAccount().getAccountNumber() — no getLinkedAccountNumber()
+                String accountNumber = fd.getSourceAccount().getAccountNumber();
+                Account account = accountRepository.findByAccountNumber(accountNumber).orElse(null);
                 if (account == null || account.getStatus() != Account.AccountStatus.ACTIVE) {
                     log.warning("FD maturity skipped — account unavailable: " + fd.getFdId());
                     continue;
@@ -93,51 +81,47 @@ public class ScheduledJobs {
                 accountRepository.save(account);
 
                 fd.setStatus(FixedDeposit.FdStatus.MATURED);
+                fd.setActualInterestEarned(maturityAmount.subtract(fd.getPrincipalAmount()));
+                fd.setClosedAt(LocalDateTime.now());
                 fixedDepositRepository.save(fd);
 
                 Transaction txn = buildSystemTransaction(
-                        fd.getLinkedAccountNumber(),
-                        maturityAmount,
+                        accountNumber, maturityAmount,
                         "FD Maturity — " + fd.getFdId() +
                                 " | Principal: ₹" + fd.getPrincipalAmount() +
-                                " | Interest: ₹" + maturityAmount.subtract(fd.getPrincipalAmount()).setScale(2, RoundingMode.HALF_UP)
+                                " | Interest: ₹" + maturityAmount.subtract(fd.getPrincipalAmount())
+                                .setScale(2, RoundingMode.HALF_UP)
                 );
                 transactionRepository.save(txn);
 
                 processed++;
-                log.info("FD matured: " + fd.getFdId() + " → ₹" + maturityAmount + " credited to " + fd.getLinkedAccountNumber());
+                log.info("FD matured: " + fd.getFdId() + " → ₹" + maturityAmount);
             } catch (Exception e) {
                 failed++;
                 log.severe("FD maturity FAILED for " + fd.getFdId() + ": " + e.getMessage());
             }
         }
-
         log.info("=== FD Maturity Job DONE | Processed: " + processed + " | Failed: " + failed + " ===");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 2. Recurring Deposit Installment Processing
-    //    Runs daily at 8:30 AM
-    //    Finds all ACTIVE RDs where next installment date = today
-    //    Deducts installment from linked account, credits RD total
+    // 2. Recurring Deposit Installments — daily at 8:30 AM
     // ─────────────────────────────────────────────────────────────────────────
 
     @Scheduled(cron = "0 30 8 * * *")
     @Transactional
     public void processRecurringDepositInstallments() {
         log.info("=== RD Installment Job START ===");
-        int processed = 0;
-        int failed    = 0;
-        int skipped   = 0;
+        int processed = 0, failed = 0, skipped = 0;
 
-        List<RecurringDeposit> dueRDs = recurringDepositRepository
-                .findByStatusAndNextInstallmentDate(RecurringDeposit.RdStatus.ACTIVE, LocalDate.now());
+        // FIX: use findDueRds(LocalDate) — the actual query method in RecurringDepositRepository
+        List<RecurringDeposit> dueRDs = recurringDepositRepository.findDueRds(LocalDate.now());
 
         for (RecurringDeposit rd : dueRDs) {
             try {
-                Account account = accountRepository
-                        .findByAccountNumber(rd.getLinkedAccountNumber())
-                        .orElse(null);
+                // FIX: rd.getSourceAccount().getAccountNumber() — no getLinkedAccountNumber()
+                String accountNumber = rd.getSourceAccount().getAccountNumber();
+                Account account = accountRepository.findByAccountNumber(accountNumber).orElse(null);
                 if (account == null || account.getStatus() != Account.AccountStatus.ACTIVE) {
                     log.warning("RD installment skipped — account unavailable: " + rd.getRdId());
                     skipped++;
@@ -146,42 +130,42 @@ public class ScheduledJobs {
 
                 BigDecimal installment = rd.getMonthlyInstallment();
                 if (account.getBalance().compareTo(installment) < 0) {
-                    log.warning("RD installment skipped — insufficient balance: " + rd.getRdId() +
-                            " | Required: ₹" + installment + " | Available: ₹" + account.getBalance());
+                    log.warning("RD installment skipped — insufficient balance: " + rd.getRdId());
+                    rd.setInstallmentsMissed(rd.getInstallmentsMissed() + 1);
+                    // FIX: rd.getNextDueDate() / setNextDueDate() — NOT getNextInstallmentDate()
+                    rd.setNextDueDate(rd.getNextDueDate().plusMonths(1));
+                    recurringDepositRepository.save(rd);
                     skipped++;
                     continue;
                 }
 
-                // Deduct from account
                 account.setBalance(account.getBalance().subtract(installment)
                         .setScale(2, RoundingMode.HALF_UP));
                 accountRepository.save(account);
 
-                // Credit to RD
-                rd.setTotalDeposited(rd.getTotalDeposited().add(installment)
-                        .setScale(2, RoundingMode.HALF_UP));
+                rd.setTotalDeposited(rd.getTotalDeposited().add(installment).setScale(2, RoundingMode.HALF_UP));
                 rd.setInstallmentsPaid(rd.getInstallmentsPaid() + 1);
-                rd.setNextInstallmentDate(rd.getNextInstallmentDate().plusMonths(1));
+                // FIX: setNextDueDate — not setNextInstallmentDate
+                rd.setNextDueDate(rd.getNextDueDate().plusMonths(1));
 
-                // Check if all installments are done
+                // Auto-mature when all installments paid
                 if (rd.getInstallmentsPaid() >= rd.getTenureMonths()) {
                     rd.setStatus(RecurringDeposit.RdStatus.MATURED);
-                    // Credit maturity amount back to account
+                    rd.setClosedAt(LocalDateTime.now());
                     BigDecimal maturityAmount = rd.getMaturityAmount();
                     account.setBalance(account.getBalance().add(maturityAmount)
                             .setScale(2, RoundingMode.HALF_UP));
                     accountRepository.save(account);
-                    Transaction maturityTxn = buildSystemTransaction(
-                            rd.getLinkedAccountNumber(), maturityAmount,
+                    Transaction matTxn = buildSystemTransaction(accountNumber, maturityAmount,
                             "RD Maturity — " + rd.getRdId());
-                    transactionRepository.save(maturityTxn);
+                    transactionRepository.save(matTxn);
                     log.info("RD matured: " + rd.getRdId());
                 }
 
                 recurringDepositRepository.save(rd);
 
                 Transaction txn = buildDebitTransaction(
-                        rd.getLinkedAccountNumber(), installment,
+                        accountNumber, installment,
                         "RD Installment #" + rd.getInstallmentsPaid() + " — " + rd.getRdId()
                 );
                 transactionRepository.save(txn);
@@ -192,34 +176,28 @@ public class ScheduledJobs {
                 log.severe("RD installment FAILED for " + rd.getRdId() + ": " + e.getMessage());
             }
         }
-
         log.info("=== RD Installment Job DONE | Processed: " + processed +
                 " | Skipped: " + skipped + " | Failed: " + failed + " ===");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 3. Loan EMI Auto-Deduction
-    //    Runs daily at 9:00 AM
-    //    Finds all ACTIVE loans where next EMI date = today
-    //    Deducts EMI from linked account, updates loan outstanding
+    // 3. Loan EMI Auto-Deduction — daily at 9:00 AM
     // ─────────────────────────────────────────────────────────────────────────
 
     @Scheduled(cron = "0 0 9 * * *")
     @Transactional
     public void processLoanEmiDeductions() {
         log.info("=== Loan EMI Job START ===");
-        int processed = 0;
-        int failed    = 0;
-        int skipped   = 0;
+        int processed = 0, failed = 0, skipped = 0;
 
-        List<Loan> dueLoans = loanRepository
-                .findByStatusAndNextEmiDate(Loan.LoanStatus.ACTIVE, LocalDate.now());
+        // FIX: use findDueEmis(LocalDate) — the actual query method in LoanRepository
+        List<Loan> dueLoans = loanRepository.findDueEmis(LocalDate.now());
 
         for (Loan loan : dueLoans) {
             try {
-                Account account = accountRepository
-                        .findByAccountNumber(loan.getLinkedAccountNumber())
-                        .orElse(null);
+                // FIX: loan.getDisbursalAccount().getAccountNumber() — no getLinkedAccountNumber()
+                String accountNumber = loan.getDisbursalAccount().getAccountNumber();
+                Account account = accountRepository.findByAccountNumber(accountNumber).orElse(null);
                 if (account == null || account.getStatus() != Account.AccountStatus.ACTIVE) {
                     log.warning("EMI skipped — account unavailable: " + loan.getLoanId());
                     skipped++;
@@ -228,35 +206,37 @@ public class ScheduledJobs {
 
                 BigDecimal emi = loan.getEmiAmount();
                 if (account.getBalance().compareTo(emi) < 0) {
-                    log.warning("EMI skipped — insufficient balance: " + loan.getLoanId() +
-                            " | Required: ₹" + emi + " | Available: ₹" + account.getBalance());
+                    log.warning("EMI skipped — insufficient balance: " + loan.getLoanId());
+                    loan.setEmisMissed(loan.getEmisMissed() + 1);
+                    loan.setNextEmiDate(loan.getNextEmiDate().plusMonths(1));
+                    loanRepository.save(loan);
                     skipped++;
                     continue;
                 }
 
-                // Deduct EMI from account
                 account.setBalance(account.getBalance().subtract(emi)
                         .setScale(2, RoundingMode.HALF_UP));
                 accountRepository.save(account);
 
-                // Update loan
-                BigDecimal newOutstanding = loan.getOutstandingAmount().subtract(emi)
+                // FIX: loan.getOutstandingBalance() / setOutstandingBalance() — not getOutstandingAmount()
+                BigDecimal newOutstanding = loan.getOutstandingBalance().subtract(emi)
                         .setScale(2, RoundingMode.HALF_UP);
-                loan.setOutstandingAmount(newOutstanding.max(BigDecimal.ZERO));
+                loan.setOutstandingBalance(newOutstanding.max(BigDecimal.ZERO));
                 loan.setEmisPaid(loan.getEmisPaid() + 1);
                 loan.setNextEmiDate(loan.getNextEmiDate().plusMonths(1));
 
-                if (loan.getOutstandingAmount().compareTo(BigDecimal.ZERO) <= 0
+                if (loan.getOutstandingBalance().compareTo(BigDecimal.ZERO) <= 0
                         || loan.getEmisPaid() >= loan.getTenureMonths()) {
                     loan.setStatus(Loan.LoanStatus.CLOSED);
-                    loan.setOutstandingAmount(BigDecimal.ZERO);
+                    loan.setOutstandingBalance(BigDecimal.ZERO);
+                    loan.setClosedAt(LocalDateTime.now());
                     log.info("Loan fully repaid: " + loan.getLoanId());
                 }
 
                 loanRepository.save(loan);
 
                 Transaction txn = buildDebitTransaction(
-                        loan.getLinkedAccountNumber(), emi,
+                        accountNumber, emi,
                         "Loan EMI #" + loan.getEmisPaid() + " — " + loan.getLoanId()
                 );
                 transactionRepository.save(txn);
@@ -267,16 +247,12 @@ public class ScheduledJobs {
                 log.severe("EMI FAILED for " + loan.getLoanId() + ": " + e.getMessage());
             }
         }
-
         log.info("=== Loan EMI Job DONE | Processed: " + processed +
                 " | Skipped: " + skipped + " | Failed: " + failed + " ===");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 4. Monthly Recurring Auto-Savings
-    //    Runs on 1st of every month at 8:00 AM
-    //    Processes all active RECURRING auto-savings rules
-    //    e.g. auto-sweeps ₹2,000/month into a savings goal
+    // 4. Monthly Recurring Auto-Savings — 1st of month at 8:00 AM
     // ─────────────────────────────────────────────────────────────────────────
 
     @Scheduled(cron = "0 0 8 1 * *")
@@ -291,10 +267,7 @@ public class ScheduledJobs {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 5. Nightly Low-Balance Scan
-    //    Runs every night at 11:30 PM
-    //    Checks all accounts with configured thresholds
-    //    Creates alert if balance < threshold (catches any missed during day)
+    // 5. Nightly Low-Balance Scan — daily at 11:30 PM
     // ─────────────────────────────────────────────────────────────────────────
 
     @Scheduled(cron = "0 30 23 * * *")
@@ -309,9 +282,7 @@ public class ScheduledJobs {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 6. Referral Expiry Cleanup
-    //    Runs every Sunday at 2:00 AM
-    //    Marks PENDING referrals older than 30 days as EXPIRED
+    // 6. Referral Expiry Cleanup — Sundays at 2:00 AM
     // ─────────────────────────────────────────────────────────────────────────
 
     @Scheduled(cron = "0 0 2 * * SUN")
@@ -324,10 +295,8 @@ public class ScheduledJobs {
                     .filter(r -> r.getStatus() == Referral.ReferralStatus.PENDING
                             && r.getCreatedAt().isBefore(cutoff))
                     .toList();
-
             stale.forEach(r -> r.setStatus(Referral.ReferralStatus.EXPIRED));
             referralRepository.saveAll(stale);
-
             log.info("=== Referral Expiry Job DONE | Expired: " + stale.size() + " ===");
         } catch (Exception e) {
             log.severe("Referral Expiry Job FAILED: " + e.getMessage());
@@ -335,12 +304,12 @@ public class ScheduledJobs {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Private Helpers
+    // Helpers
     // ─────────────────────────────────────────────────────────────────────────
 
     private Transaction buildSystemTransaction(String toAccount, BigDecimal amount, String description) {
         return Transaction.builder()
-                .transactionId(com.swiftvault.backend.util.IdGenerator.transactionId())
+                .transactionId(IdGenerator.transactionId())
                 .fromAccount("SYSTEM")
                 .toAccount(toAccount)
                 .type(Transaction.TransactionType.DEPOSIT)
@@ -351,7 +320,7 @@ public class ScheduledJobs {
 
     private Transaction buildDebitTransaction(String fromAccount, BigDecimal amount, String description) {
         return Transaction.builder()
-                .transactionId(com.swiftvault.backend.util.IdGenerator.transactionId())
+                .transactionId(IdGenerator.transactionId())
                 .fromAccount(fromAccount)
                 .type(Transaction.TransactionType.WITHDRAW)
                 .amount(amount)

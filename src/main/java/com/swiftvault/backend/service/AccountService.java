@@ -13,18 +13,19 @@ public interface AccountService {
     AccountResponse getAccount(String userId, String accountNumber);
     void setNickname(String userId, String accountNumber, String nickname);
 
-    TransactionResponse deposit(String userId, DepositRequest request);
-    TransactionResponse withdraw(String userId, WithdrawRequest request);
+    // Controller passes (userId, accountNumber, request) — accountNumber injected into request
+    TransactionResponse deposit(String userId, String accountNumber, DepositRequest request);
+    TransactionResponse withdraw(String userId, String accountNumber, WithdrawRequest request);
     TransactionResponse transfer(String userId, TransferRequest request);
 
     List<TransactionResponse> getTransactionHistory(String userId, String accountNumber);
     List<TransactionResponse> getMiniStatement(String userId, String accountNumber);
     List<TransactionResponse> getFilteredHistory(String userId, String accountNumber, String type);
 
-    // Admin
+    // Admin operations — freeze/unfreeze return AccountResponse
     List<AccountResponse> getAllAccounts();
-    void freezeAccount(String accountNumber);
-    void unfreezeAccount(String accountNumber);
+    AccountResponse freezeAccount(String accountNumber, String reason);
+    AccountResponse unfreezeAccount(String accountNumber);
     void closeAccount(String accountNumber);
     void applyMonthlyInterest();
     void applyLowBalanceFees();

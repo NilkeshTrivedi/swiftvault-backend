@@ -66,12 +66,14 @@ public class AdminController {
 
     @PutMapping("/accounts/{accountNumber}/freeze")
     public ResponseEntity<ApiResponse<Void>> freezeAccount(@PathVariable String accountNumber) {
-        accountService.freezeAccount(accountNumber);
+        // FIX: freezeAccount now returns AccountResponse — we discard it here, return void response
+        accountService.freezeAccount(accountNumber, "Admin action");
         return ResponseEntity.ok(ApiResponse.success("Account frozen"));
     }
 
     @PutMapping("/accounts/{accountNumber}/unfreeze")
     public ResponseEntity<ApiResponse<Void>> unfreezeAccount(@PathVariable String accountNumber) {
+        // FIX: unfreezeAccount now returns AccountResponse — discard it here
         accountService.unfreezeAccount(accountNumber);
         return ResponseEntity.ok(ApiResponse.success("Account unfrozen"));
     }

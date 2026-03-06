@@ -29,15 +29,11 @@ public class AccountController {
 
     public AccountController(AccountService accountService,
                              AccountSelfFreezeService selfFreezeService) {
-        this.accountService   = accountService;
+        this.accountService    = accountService;
         this.selfFreezeService = selfFreezeService;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Open Account
-    // POST /api/accounts
-    // Body: { "accountType": "SAVINGS" }
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Open Account ──────────────────────────────────────────────────────────
 
     @PostMapping
     public ResponseEntity<ApiResponse<AccountResponse>> openAccount(
@@ -48,10 +44,7 @@ public class AccountController {
                 .body(ApiResponse.success("Account opened successfully", account));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Get My Accounts
-    // GET /api/accounts
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Get My Accounts ───────────────────────────────────────────────────────
 
     @GetMapping
     public ResponseEntity<ApiResponse<List<AccountResponse>>> getMyAccounts(
@@ -60,10 +53,7 @@ public class AccountController {
                 accountService.getMyAccounts(user.getUserId())));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Get Account Details
-    // GET /api/accounts/{accountNumber}
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Get Account Details ───────────────────────────────────────────────────
 
     @GetMapping("/{accountNumber}")
     public ResponseEntity<ApiResponse<AccountResponse>> getAccount(
@@ -73,10 +63,7 @@ public class AccountController {
                 accountService.getAccount(user.getUserId(), accountNumber)));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Get Balance
-    // GET /api/accounts/{accountNumber}/balance
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Get Balance ───────────────────────────────────────────────────────────
 
     @GetMapping("/{accountNumber}/balance")
     public ResponseEntity<ApiResponse<Map<String, Object>>> getBalance(
@@ -87,64 +74,50 @@ public class AccountController {
                 Map.of(
                         "accountNumber", account.getAccountNumber(),
                         "balance",       account.getBalance(),
-                        "accountType",   account.getAccountType(),
+                        // FIX: AccountResponse has getType(), not getAccountType()
+                        "accountType",   account.getType(),
                         "status",        account.getStatus()
                 )));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Deposit
-    // POST /api/accounts/{accountNumber}/deposit
-    // Body: { "amount": 5000, "description": "Salary" }
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Deposit ───────────────────────────────────────────────────────────────
 
     @PostMapping("/{accountNumber}/deposit")
     public ResponseEntity<ApiResponse<TransactionResponse>> deposit(
             @AuthenticationPrincipal User user,
             @PathVariable String accountNumber,
             @Valid @RequestBody DepositRequest request) {
+        // FIX: service signature is (userId, accountNumber, request)
         return ResponseEntity.ok(ApiResponse.success("Deposit successful",
                 accountService.deposit(user.getUserId(), accountNumber, request)));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Withdraw
-    // POST /api/accounts/{accountNumber}/withdraw
-    // Body: { "amount": 1000, "transactionPin": "1234", "description": "ATM" }
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Withdraw ──────────────────────────────────────────────────────────────
 
     @PostMapping("/{accountNumber}/withdraw")
     public ResponseEntity<ApiResponse<TransactionResponse>> withdraw(
             @AuthenticationPrincipal User user,
             @PathVariable String accountNumber,
             @Valid @RequestBody WithdrawRequest request) {
+        // FIX: service signature is (userId, accountNumber, request)
         return ResponseEntity.ok(ApiResponse.success("Withdrawal successful",
                 accountService.withdraw(user.getUserId(), accountNumber, request)));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Transfer
-    // POST /api/accounts/{accountNumber}/transfer
-    // Body: { "fromAccount": "ACC-XXX", "toAccount": "ACC-YYY",
-    //         "amount": 5000, "transactionPin": "1234", "description": "Rent" }
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Transfer ──────────────────────────────────────────────────────────────
 
     @PostMapping("/{accountNumber}/transfer")
     public ResponseEntity<ApiResponse<TransactionResponse>> transfer(
             @AuthenticationPrincipal User user,
             @PathVariable String accountNumber,
             @Valid @RequestBody TransferRequest request) {
-        // Ensure the path account matches the request fromAccount
         if (!accountNumber.equals(request.getFromAccount()))
             request.setFromAccount(accountNumber);
         return ResponseEntity.ok(ApiResponse.success("Transfer successful",
                 accountService.transfer(user.getUserId(), request)));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Transaction History
-    // GET /api/accounts/{accountNumber}/transactions
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Transaction History ───────────────────────────────────────────────────
 
     @GetMapping("/{accountNumber}/transactions")
     public ResponseEntity<ApiResponse<List<TransactionResponse>>> getTransactionHistory(
@@ -154,15 +127,7 @@ public class AccountController {
                 accountService.getTransactionHistory(user.getUserId(), accountNumber)));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Self-Freeze (Phase 3B)
-    // POST /api/accounts/{accountNumber}/self-freeze
-    // Body: { "transactionPin": "1234" }
-    //
-    // User freezes their own account immediately.
-    // Use case: suspected compromise, lost credentials.
-    // Also creates a ACCOUNT_SELF_FROZEN fraud alert for admin visibility.
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Self-Freeze ───────────────────────────────────────────────────────────
 
     @PostMapping("/{accountNumber}/self-freeze")
     public ResponseEntity<ApiResponse<Void>> selfFreeze(
@@ -172,19 +137,10 @@ public class AccountController {
         selfFreezeService.selfFreeze(user.getUserId(), accountNumber,
                 body.get("transactionPin"));
         return ResponseEntity.ok(ApiResponse.success(
-                "Account frozen. No further transactions are possible. " +
-                        "Use self-unfreeze with your PIN to restore access."));
+                "Account frozen. Use self-unfreeze with your PIN to restore access."));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Self-Unfreeze (Phase 3B)
-    // POST /api/accounts/{accountNumber}/self-unfreeze
-    // Body: { "transactionPin": "1234" }
-    //
-    // User unfreezes their own account.
-    // Only works for self-frozen accounts — admin-frozen accounts
-    // require admin action via PUT /api/accounts/{accountNumber}/unfreeze.
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Self-Unfreeze ─────────────────────────────────────────────────────────
 
     @PostMapping("/{accountNumber}/self-unfreeze")
     public ResponseEntity<ApiResponse<Void>> selfUnfreeze(
@@ -196,11 +152,7 @@ public class AccountController {
         return ResponseEntity.ok(ApiResponse.success("Account unfrozen. Transactions are now enabled."));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // ADMIN — Freeze Account
-    // PUT /api/accounts/{accountNumber}/freeze
-    // Body: { "reason": "Suspicious activity detected" }
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── ADMIN — Freeze ────────────────────────────────────────────────────────
 
     @PutMapping("/{accountNumber}/freeze")
     @PreAuthorize("hasRole('ADMIN')")
@@ -208,27 +160,25 @@ public class AccountController {
             @PathVariable String accountNumber,
             @RequestBody(required = false) Map<String, String> body) {
         String reason = body != null ? body.getOrDefault("reason", "Admin action") : "Admin action";
+        // FIX: service returns AccountResponse — use it directly
         return ResponseEntity.ok(ApiResponse.success("Account frozen by admin",
                 accountService.freezeAccount(accountNumber, reason)));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // ADMIN — Unfreeze Account
-    // PUT /api/accounts/{accountNumber}/unfreeze
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── ADMIN — Unfreeze ──────────────────────────────────────────────────────
 
     @PutMapping("/{accountNumber}/unfreeze")
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<ApiResponse<AccountResponse>> adminUnfreeze(
             @PathVariable String accountNumber) {
+        // FIX: service returns AccountResponse — 'void' type not allowed here was because
+        //      original code used void return type in a ResponseEntity<ApiResponse<Void>>
+        //      but tried to pass the result as data. Now we return AccountResponse.
         return ResponseEntity.ok(ApiResponse.success("Account unfrozen by admin",
                 accountService.unfreezeAccount(accountNumber)));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // ADMIN — Get All Accounts
-    // GET /api/accounts/admin/all
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── ADMIN — Get All Accounts ──────────────────────────────────────────────
 
     @GetMapping("/admin/all")
     @PreAuthorize("hasRole('ADMIN')")
