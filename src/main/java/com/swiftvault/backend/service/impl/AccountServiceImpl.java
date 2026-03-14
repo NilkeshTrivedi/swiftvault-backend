@@ -1,9 +1,6 @@
 package com.swiftvault.backend.service.impl;
 
-import com.swiftvault.backend.dto.request.DepositRequest;
-import com.swiftvault.backend.dto.request.OpenAccountRequest;
-import com.swiftvault.backend.dto.request.TransferRequest;
-import com.swiftvault.backend.dto.request.WithdrawRequest;
+import com.swiftvault.backend.dto.request.*;
 import com.swiftvault.backend.dto.response.AccountResponse;
 import com.swiftvault.backend.dto.response.DashboardResponse;
 import com.swiftvault.backend.dto.response.TransactionResponse;
@@ -22,18 +19,18 @@ import java.math.RoundingMode;
 import java.util.List;
 
 @Service
+@Transactional
 public class AccountServiceImpl implements AccountService {
 
-    private final AccountRepository       accountRepository;
-    private final TransactionRepository   transactionRepository;
-    private final UserService             userService;
-    private final PasswordEncoder         passwordEncoder;
-
-    private final FraudDetectionService   fraudDetectionService;
-    private final TransactionLimitService transactionLimitService;
-    private final AutoSavingsService      autoSavingsService;
-    private final LowBalanceAlertService  lowBalanceAlertService;
-    private final ReferralService         referralService;
+    private final AccountRepository         accountRepository;
+    private final TransactionRepository     transactionRepository;
+    private final UserService               userService;
+    private final PasswordEncoder           passwordEncoder;
+    private final FraudDetectionService     fraudDetectionService;
+    private final TransactionLimitService   transactionLimitService;
+    private final AutoSavingsService        autoSavingsService;
+    private final LowBalanceAlertService    lowBalanceAlertService;
+    private final ReferralService           referralService;
 
     public AccountServiceImpl(AccountRepository accountRepository,
                               TransactionRepository transactionRepository,
@@ -55,49 +52,59 @@ public class AccountServiceImpl implements AccountService {
         this.referralService         = referralService;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Open Account
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Open Account ──────────────────────────────────────────────────────────
 
     @Override
-    @Transactional
     public AccountResponse openAccount(String userId, OpenAccountRequest request) {
         User user = userService.findById(userId);
 
-        // FIX: request.getType() — not getAccountType()
         if (request.getType() == null)
             throw SwiftVaultException.badRequest("Account type is required");
 
-        // FIX: accountRepository has no existsByAccountNumber() —
-        //      use findByAccountNumber().isPresent() instead
+        // Validate minimum initial deposit for SAVINGS
+        BigDecimal initialDeposit = request.getInitialDeposit() != null
+                ? request.getInitialDeposit()
+                : BigDecimal.ZERO;
+
+        if (request.getType() == Account.AccountType.SAVINGS &&
+                initialDeposit.compareTo(Account.MINIMUM_BALANCE_SAVINGS) < 0)
+            throw SwiftVaultException.badRequest(
+                    "SAVINGS account requires minimum deposit of ₹" + Account.MINIMUM_BALANCE_SAVINGS);
+
+        // Generate unique account number
         String accountNumber;
         do {
             accountNumber = IdGenerator.accountNumber();
         } while (accountRepository.findByAccountNumber(accountNumber).isPresent());
 
+        // FIX: use initialDeposit as starting balance (not ZERO)
         Account account = new Account();
         account.setAccountNumber(accountNumber);
         account.setUser(user);
-        // FIX: account.setType() — not setAccountType()
         account.setType(request.getType());
-        account.setBalance(BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP));
+        account.setBalance(initialDeposit.setScale(2, RoundingMode.HALF_UP));
         account.setStatus(Account.AccountStatus.ACTIVE);
-
         Account saved = accountRepository.save(account);
 
-        // Phase 3B: Referral reward on first account open
-        try {
-            referralService.onFirstAccountOpened(user, saved);
-        } catch (Exception e) {
-            // Never let referral logic break account creation
+        // Record initial deposit transaction if amount > 0
+        if (initialDeposit.compareTo(BigDecimal.ZERO) > 0) {
+            transactionRepository.save(Transaction.builder()
+                    .transactionId(IdGenerator.transactionId())
+                    .fromAccount(accountNumber)
+                    .toAccount(accountNumber)
+                    .type(Transaction.TransactionType.DEPOSIT)
+                    .amount(initialDeposit.setScale(2, RoundingMode.HALF_UP))
+                    .description("Initial deposit")
+                    .build());
         }
+
+        // Phase 3B: referral reward on first account open (non-fatal)
+        try { referralService.onFirstAccountOpened(user, saved); } catch (Exception ignored) {}
 
         return AccountResponse.from(saved);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Get My Accounts
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Get My Accounts ───────────────────────────────────────────────────────
 
     @Override
     public List<AccountResponse> getMyAccounts(String userId) {
@@ -106,34 +113,26 @@ public class AccountServiceImpl implements AccountService {
                 .stream().map(AccountResponse::from).toList();
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Get Account
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Get Account ───────────────────────────────────────────────────────────
 
     @Override
     public AccountResponse getAccount(String userId, String accountNumber) {
         return AccountResponse.from(findAndVerifyOwnership(userId, accountNumber));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Set Nickname
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Set Nickname ──────────────────────────────────────────────────────────
 
     @Override
-    @Transactional
     public void setNickname(String userId, String accountNumber, String nickname) {
         Account account = findAndVerifyOwnership(userId, accountNumber);
         account.setNickname(nickname);
         accountRepository.save(account);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Deposit
-    // FIX: signature is (userId, accountNumber, request) to match controller
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Deposit ───────────────────────────────────────────────────────────────
+    // Interface: deposit(String userId, String accountNumber, DepositRequest request)
 
     @Override
-    @Transactional
     public TransactionResponse deposit(String userId, String accountNumber, DepositRequest request) {
         Account account = findAndVerifyOwnership(userId, accountNumber);
 
@@ -141,15 +140,12 @@ public class AccountServiceImpl implements AccountService {
             throw SwiftVaultException.badRequest("Account is not active. Status: " + account.getStatus());
 
         BigDecimal amount = request.getAmount();
-        if (amount.compareTo(BigDecimal.ZERO) <= 0)
-            throw SwiftVaultException.badRequest("Deposit amount must be greater than zero");
-
         account.setBalance(account.getBalance().add(amount).setScale(2, RoundingMode.HALF_UP));
         accountRepository.save(account);
 
         Transaction txn = Transaction.builder()
                 .transactionId(IdGenerator.transactionId())
-                .fromAccount(accountNumber)   // fromAccount = depositing account
+                .fromAccount(accountNumber)
                 .toAccount(accountNumber)
                 .type(Transaction.TransactionType.DEPOSIT)
                 .amount(amount)
@@ -157,18 +153,13 @@ public class AccountServiceImpl implements AccountService {
                 .build();
         transactionRepository.save(txn);
 
-        // FIX: TransactionResponse.from() takes only Transaction — no second arg
         return TransactionResponse.from(txn);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Withdraw
-    // FIX: signature is (userId, accountNumber, request)
-    // FIX: no findByAccountNumberWithLock — use findByAccountNumber + optimistic approach
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Withdraw ──────────────────────────────────────────────────────────────
+    // Interface: withdraw(String userId, String accountNumber, WithdrawRequest request)
 
     @Override
-    @Transactional
     public TransactionResponse withdraw(String userId, String accountNumber, WithdrawRequest request) {
         Account account = accountRepository.findByAccountNumber(accountNumber)
                 .orElseThrow(() -> SwiftVaultException.notFound("Account not found: " + accountNumber));
@@ -179,17 +170,23 @@ public class AccountServiceImpl implements AccountService {
             throw SwiftVaultException.badRequest("Account is not active. Status: " + account.getStatus());
 
         User user = userService.findById(userId);
-        verifyTransactionPin(user, request.getTransactionPin());
+        verifyPin(user, request.getTransactionPin());
 
         BigDecimal amount = request.getAmount();
-        if (amount.compareTo(BigDecimal.ZERO) <= 0)
-            throw SwiftVaultException.badRequest("Withdrawal amount must be greater than zero");
         if (account.getBalance().compareTo(amount) < 0)
-            throw SwiftVaultException.badRequest("Insufficient balance. Available: ₹" +
-                    account.getBalance().toPlainString());
+            throw SwiftVaultException.badRequest(
+                    "Insufficient balance. Available: ₹" + account.getBalance().toPlainString());
 
-        // Phase 3B: enforce transaction limits before balance change
-        transactionLimitService.enforceLimit(accountNumber, amount);
+        // Phase 3B: enforce transaction limits
+        try { transactionLimitService.enforceLimit(accountNumber, amount); } catch (SwiftVaultException e) { throw e; } catch (Exception ignored) {}
+
+        // SAVINGS minimum balance check
+        if (account.getType() == Account.AccountType.SAVINGS) {
+            BigDecimal afterBalance = account.getBalance().subtract(amount);
+            if (afterBalance.compareTo(Account.MINIMUM_BALANCE_SAVINGS) < 0)
+                throw SwiftVaultException.badRequest(
+                        "SAVINGS accounts must maintain minimum balance of ₹" + Account.MINIMUM_BALANCE_SAVINGS);
+        }
 
         account.setBalance(account.getBalance().subtract(amount).setScale(2, RoundingMode.HALF_UP));
         accountRepository.save(account);
@@ -203,75 +200,71 @@ public class AccountServiceImpl implements AccountService {
                 .build();
         transactionRepository.save(txn);
 
-        // Phase 3B: post-debit hooks (all silent)
+        // Post-debit hooks (all non-fatal)
         runPostDebitHooks(user, account, amount, Transaction.TransactionType.WITHDRAW);
 
-        // FIX: TransactionResponse.from() — one arg
         return TransactionResponse.from(txn);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Transfer
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Transfer ──────────────────────────────────────────────────────────────
+    // Interface: transfer(String userId, TransferRequest request)
 
     @Override
-    @Transactional
     public TransactionResponse transfer(String userId, TransferRequest request) {
-        String fromAccountNumber = request.getFromAccount();
-        String toAccountNumber   = request.getToAccount();
+        String fromNum = request.getFromAccount();
+        String toNum   = request.getToAccount();
 
-        if (fromAccountNumber.equals(toAccountNumber))
+        if (fromNum == null || fromNum.isBlank())
+            throw SwiftVaultException.badRequest("fromAccount is required");
+        if (toNum == null || toNum.isBlank())
+            throw SwiftVaultException.badRequest("toAccount is required");
+        if (fromNum.equals(toNum))
             throw SwiftVaultException.badRequest("Cannot transfer to the same account");
 
-        Account fromAccount = accountRepository.findByAccountNumber(fromAccountNumber)
-                .orElseThrow(() -> SwiftVaultException.notFound("Account not found: " + fromAccountNumber));
-        Account toAccount = accountRepository.findByAccountNumber(toAccountNumber)
-                .orElseThrow(() -> SwiftVaultException.notFound("Account not found: " + toAccountNumber));
+        Account from = accountRepository.findByAccountNumber(fromNum)
+                .orElseThrow(() -> SwiftVaultException.notFound("Source account not found: " + fromNum));
+        Account to   = accountRepository.findByAccountNumber(toNum)
+                .orElseThrow(() -> SwiftVaultException.notFound("Destination account not found: " + toNum));
 
-        if (!fromAccount.getUser().getUserId().equals(userId))
+        if (!from.getUser().getUserId().equals(userId))
             throw SwiftVaultException.forbidden("You don't own the source account");
-        if (fromAccount.getStatus() != Account.AccountStatus.ACTIVE)
-            throw SwiftVaultException.badRequest("Source account is not active. Status: " + fromAccount.getStatus());
-        if (toAccount.getStatus() != Account.AccountStatus.ACTIVE)
+        if (from.getStatus() != Account.AccountStatus.ACTIVE)
+            throw SwiftVaultException.badRequest("Source account is not active");
+        if (to.getStatus() != Account.AccountStatus.ACTIVE)
             throw SwiftVaultException.badRequest("Destination account is not active");
 
         User user = userService.findById(userId);
-        verifyTransactionPin(user, request.getTransactionPin());
+        verifyPin(user, request.getTransactionPin());
 
         BigDecimal amount = request.getAmount();
-        if (amount.compareTo(BigDecimal.ZERO) <= 0)
-            throw SwiftVaultException.badRequest("Transfer amount must be greater than zero");
-        if (fromAccount.getBalance().compareTo(amount) < 0)
-            throw SwiftVaultException.badRequest("Insufficient balance. Available: ₹" +
-                    fromAccount.getBalance().toPlainString());
+        if (from.getBalance().compareTo(amount) < 0)
+            throw SwiftVaultException.badRequest(
+                    "Insufficient balance. Available: ₹" + from.getBalance().toPlainString());
 
-        // Phase 3B: enforce limits before balance change
-        transactionLimitService.enforceLimit(fromAccountNumber, amount);
+        // Phase 3B: enforce limits
+        try { transactionLimitService.enforceLimit(fromNum, amount); } catch (SwiftVaultException e) { throw e; } catch (Exception ignored) {}
 
-        fromAccount.setBalance(fromAccount.getBalance().subtract(amount).setScale(2, RoundingMode.HALF_UP));
-        toAccount.setBalance(toAccount.getBalance().add(amount).setScale(2, RoundingMode.HALF_UP));
-        accountRepository.save(fromAccount);
-        accountRepository.save(toAccount);
+        from.setBalance(from.getBalance().subtract(amount).setScale(2, RoundingMode.HALF_UP));
+        to.setBalance(to.getBalance().add(amount).setScale(2, RoundingMode.HALF_UP));
+        accountRepository.save(from);
+        accountRepository.save(to);
 
         Transaction txn = Transaction.builder()
                 .transactionId(IdGenerator.transactionId())
-                .fromAccount(fromAccountNumber)
-                .toAccount(toAccountNumber)
+                .fromAccount(fromNum)
+                .toAccount(toNum)
                 .type(Transaction.TransactionType.TRANSFER)
                 .amount(amount)
                 .description(request.getDescription() != null ? request.getDescription() : "Transfer")
                 .build();
         transactionRepository.save(txn);
 
-        runPostDebitHooks(user, fromAccount, amount, Transaction.TransactionType.TRANSFER);
+        runPostDebitHooks(user, from, amount, Transaction.TransactionType.TRANSFER);
 
-        // FIX: TransactionResponse.from() — one arg
         return TransactionResponse.from(txn);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Transaction History
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Transaction History ───────────────────────────────────────────────────
 
     @Override
     public List<TransactionResponse> getTransactionHistory(String userId, String accountNumber) {
@@ -279,9 +272,7 @@ public class AccountServiceImpl implements AccountService {
         return transactionRepository.findByAccountNumber(accountNumber)
                 .stream()
                 .sorted((a, b) -> b.getTimestamp().compareTo(a.getTimestamp()))
-                // FIX: TransactionResponse.from() — one arg
-                .map(TransactionResponse::from)
-                .toList();
+                .map(TransactionResponse::from).toList();
     }
 
     @Override
@@ -294,40 +285,37 @@ public class AccountServiceImpl implements AccountService {
     @Override
     public List<TransactionResponse> getFilteredHistory(String userId, String accountNumber, String type) {
         findAndVerifyOwnership(userId, accountNumber);
-        Transaction.TransactionType txnType = Transaction.TransactionType.valueOf(type.toUpperCase());
+        Transaction.TransactionType txnType;
+        try {
+            txnType = Transaction.TransactionType.valueOf(type.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            throw SwiftVaultException.badRequest("Invalid transaction type: " + type);
+        }
         return transactionRepository.findByAccountNumberAndType(accountNumber, txnType)
                 .stream().map(TransactionResponse::from).toList();
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Admin — Freeze / Unfreeze / Close
-    // FIX: freezeAccount(accountNumber, reason) and unfreezeAccount(accountNumber) return AccountResponse
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Admin: Freeze / Unfreeze / Close ──────────────────────────────────────
+    // Interface: freezeAccount(String accountNumber, String reason) → AccountResponse
+    // Interface: unfreezeAccount(String accountNumber)              → AccountResponse
 
     @Override
-    @Transactional
     public AccountResponse freezeAccount(String accountNumber, String reason) {
         Account account = accountRepository.findByAccountNumber(accountNumber)
                 .orElseThrow(() -> SwiftVaultException.notFound("Account not found: " + accountNumber));
-        if (account.getStatus() == Account.AccountStatus.FROZEN)
-            throw SwiftVaultException.badRequest("Account is already frozen");
         account.setStatus(Account.AccountStatus.FROZEN);
         return AccountResponse.from(accountRepository.save(account));
     }
 
     @Override
-    @Transactional
     public AccountResponse unfreezeAccount(String accountNumber) {
         Account account = accountRepository.findByAccountNumber(accountNumber)
                 .orElseThrow(() -> SwiftVaultException.notFound("Account not found: " + accountNumber));
-        if (account.getStatus() != Account.AccountStatus.FROZEN)
-            throw SwiftVaultException.badRequest("Account is not frozen");
         account.setStatus(Account.AccountStatus.ACTIVE);
         return AccountResponse.from(accountRepository.save(account));
     }
 
     @Override
-    @Transactional
     public void closeAccount(String accountNumber) {
         Account account = accountRepository.findByAccountNumber(accountNumber)
                 .orElseThrow(() -> SwiftVaultException.notFound("Account not found: " + accountNumber));
@@ -342,37 +330,33 @@ public class AccountServiceImpl implements AccountService {
         return accountRepository.findAll().stream().map(AccountResponse::from).toList();
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Admin — Operations
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Admin: Operations ─────────────────────────────────────────────────────
 
     @Override
-    @Transactional
     public void applyMonthlyInterest() {
-        List<Account> savingsAccounts = accountRepository
+        List<Account> savings = accountRepository
                 .findByTypeAndStatus(Account.AccountType.SAVINGS, Account.AccountStatus.ACTIVE);
-        for (Account account : savingsAccounts) {
-            BigDecimal interest = account.getBalance()
+        for (Account a : savings) {
+            BigDecimal interest = a.getBalance()
                     .multiply(Account.SAVINGS_INTEREST_RATE)
                     .divide(new BigDecimal("12"), 2, RoundingMode.HALF_UP);
             if (interest.compareTo(BigDecimal.ZERO) > 0) {
-                account.setBalance(account.getBalance().add(interest));
-                account.setLastInterestApplied(java.time.LocalDateTime.now());
-                accountRepository.save(account);
+                a.setBalance(a.getBalance().add(interest));
+                a.setLastInterestApplied(java.time.LocalDateTime.now());
+                accountRepository.save(a);
             }
         }
     }
 
     @Override
-    @Transactional
     public void applyLowBalanceFees() {
-        List<Account> savingsAccounts = accountRepository
+        List<Account> savings = accountRepository
                 .findByTypeAndStatus(Account.AccountType.SAVINGS, Account.AccountStatus.ACTIVE);
-        for (Account account : savingsAccounts) {
-            if (account.getBalance().compareTo(Account.MINIMUM_BALANCE_SAVINGS) < 0) {
-                BigDecimal newBalance = account.getBalance().subtract(Account.LOW_BALANCE_FEE);
-                account.setBalance(newBalance.max(BigDecimal.ZERO));
-                accountRepository.save(account);
+        for (Account a : savings) {
+            if (a.getBalance().compareTo(Account.MINIMUM_BALANCE_SAVINGS) < 0) {
+                BigDecimal newBal = a.getBalance().subtract(Account.LOW_BALANCE_FEE).max(BigDecimal.ZERO);
+                a.setBalance(newBal);
+                accountRepository.save(a);
             }
         }
     }
@@ -380,7 +364,6 @@ public class AccountServiceImpl implements AccountService {
     @Override
     public DashboardResponse getDashboard() {
         return DashboardResponse.builder()
-                .totalUsers(0)  // Users counted in UserService
                 .totalAccounts(accountRepository.count())
                 .activeAccounts(accountRepository.countByStatus(Account.AccountStatus.ACTIVE))
                 .totalBankBalance(accountRepository.getTotalBankBalanceByStatus(Account.AccountStatus.ACTIVE))
@@ -389,14 +372,12 @@ public class AccountServiceImpl implements AccountService {
 
     @Override
     public void exportTransactionsCsv(String filePath) {
-        // CSV export — writes all transactions to the given file path
         try {
             java.io.File dir = new java.io.File(filePath).getParentFile();
             if (dir != null && !dir.exists()) dir.mkdirs();
-
             List<Transaction> all = transactionRepository.findAll();
-            StringBuilder sb = new StringBuilder();
-            sb.append("transactionId,fromAccount,toAccount,type,amount,description,timestamp\n");
+            StringBuilder sb = new StringBuilder(
+                    "transactionId,fromAccount,toAccount,type,amount,description,timestamp\n");
             for (Transaction t : all) {
                 sb.append(String.join(",",
                         t.getTransactionId(),
@@ -404,7 +385,9 @@ public class AccountServiceImpl implements AccountService {
                         t.getToAccount()   != null ? t.getToAccount()   : "",
                         t.getType().name(),
                         t.getAmount().toPlainString(),
-                        t.getDescription() != null ? "\"" + t.getDescription().replace("\"", "'") + "\"" : "",
+                        t.getDescription() != null
+                                ? "\"" + t.getDescription().replace("\"", "'") + "\""
+                                : "",
                         t.getTimestamp().toString()
                 )).append("\n");
             }
@@ -414,9 +397,7 @@ public class AccountServiceImpl implements AccountService {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Private Helpers
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Private Helpers ───────────────────────────────────────────────────────
 
     private Account findAndVerifyOwnership(String userId, String accountNumber) {
         Account account = accountRepository.findByAccountNumber(accountNumber)
@@ -426,10 +407,10 @@ public class AccountServiceImpl implements AccountService {
         return account;
     }
 
-    private void verifyTransactionPin(User user, String pin) {
+    private void verifyPin(User user, String pin) {
         if (!user.hasTransactionPin())
             throw SwiftVaultException.badRequest(
-                    "Transaction PIN not set. Please set a PIN before making transactions.");
+                    "Transaction PIN not set. Please set one in your profile.");
         if (pin == null || pin.isBlank())
             throw SwiftVaultException.badRequest("Transaction PIN is required");
         if (!passwordEncoder.matches(pin, user.getPinHash()))
@@ -438,16 +419,11 @@ public class AccountServiceImpl implements AccountService {
 
     private void runPostDebitHooks(User user, Account account,
                                    BigDecimal amount, Transaction.TransactionType type) {
-        try {
-            fraudDetectionService.analyzeTransaction(user, account, amount, type);
-        } catch (Exception ignored) {}
-
-        try {
-            lowBalanceAlertService.checkAndAlert(account);
-        } catch (Exception ignored) {}
-
-        try {
-            autoSavingsService.applyRoundUp(account.getAccountNumber(), amount);
-        } catch (Exception ignored) {}
+        try { fraudDetectionService.analyzeTransaction(user, account, amount, type); }
+        catch (Exception ignored) {}
+        try { lowBalanceAlertService.checkAndAlert(account); }
+        catch (Exception ignored) {}
+        try { autoSavingsService.applyRoundUp(account.getAccountNumber(), amount); }
+        catch (Exception ignored) {}
     }
 }
