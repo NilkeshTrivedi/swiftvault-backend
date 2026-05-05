@@ -105,10 +105,10 @@ public class ScheduledJobs {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 2. Recurring Deposit Installments — daily at 8:30 AM
+    // 2. Recurring Deposit Installments — Once a month at 8:30 AM
     // ─────────────────────────────────────────────────────────────────────────
 
-    @Scheduled(cron = "0 30 8 * * *")
+    @Scheduled(cron = "0 30 8 1 * *")
     @Transactional
     public void processRecurringDepositInstallments() {
         log.info("=== RD Installment Job START ===");
@@ -181,10 +181,10 @@ public class ScheduledJobs {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 3. Loan EMI Auto-Deduction — daily at 9:00 AM
+    // 3. Loan EMI Auto-Deduction — Once a month at 9:00 AM
     // ─────────────────────────────────────────────────────────────────────────
 
-    @Scheduled(cron = "0 0 9 * * *")
+    @Scheduled(cron = "0 0 9 1 * *")
     @Transactional
     public void processLoanEmiDeductions() {
         log.info("=== Loan EMI Job START ===");
